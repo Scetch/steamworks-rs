@@ -1,10 +1,10 @@
-use super::*;
-
-use libc::{ c_void };
-use sys;
-
 use std::mem;
 use std::sync::{ Arc, Weak };
+
+use libc::c_void;
+use sys;
+
+use ::State;
 
 pub unsafe trait Callback {
     const ID: i32;
@@ -12,7 +12,7 @@ pub unsafe trait Callback {
     unsafe fn from_raw(raw: *mut c_void) -> Self;
 }
 
-pub(crate) unsafe fn register_callback<C, F, Manager>(inner: &Arc<Inner<Manager>>, f: F, game_server: bool)
+pub(crate) unsafe fn register_callback<C, F>(state: &Arc<State>, f: F, game_server: bool)
     where C: Callback,
           F: FnMut(C) + Send + Sync + 'static
 {
@@ -55,32 +55,32 @@ pub(crate) unsafe fn register_callback<C, F, Manager>(inner: &Arc<Inner<Manager>
 
     sys::SteamAPI_RegisterCallback(ptr, C::ID as _);
 
-    let mut cbs = inner.callbacks.lock().unwrap();
+    let mut cbs = state.callbacks.lock().unwrap();
     cbs.callbacks.push(ptr);
 }
 
-pub(crate) unsafe fn register_call_result<C, F, Manager>(inner: &Arc<Inner<Manager>>, api_call: sys::SteamAPICall, callback_id: i32, f: F)
+pub(crate) unsafe fn register_call_result<C, F>(state: &Arc<State>, api_call: sys::SteamAPICall, callback_id: i32, f: F)
     where F: for <'a> FnMut(&'a C, bool) + 'static + Send + Sync
 {
-    struct CallData<F, Manager> {
+    struct CallData<F> {
         func: F,
         api_call: sys::SteamAPICall,
-        inner: Weak<Inner<Manager>>,
+        state: Weak<State>,
     }
 
-    unsafe extern "C" fn run<C, F, Manager>(cb: *mut c_void, userdata: *mut c_void, param: *mut c_void)
+    unsafe extern "C" fn run<C, F>(cb: *mut c_void, userdata: *mut c_void, param: *mut c_void)
         where F: for<'a> FnMut(&'a C, bool) + Send + Sync + 'static
     {
-        let data: &mut CallData<F, Manager> = &mut *(userdata as *mut CallData<F, Manager>);
+        let data: &mut CallData<F> = &mut *(userdata as *mut CallData<F>);
         (data.func)(&*(param as *const _), false);
         
         sys::delete_rust_callback(cb);
     }
 
-    unsafe extern "C" fn run_extra<C, F, Manager>(cb: *mut c_void, userdata: *mut c_void, param: *mut c_void, io_error: bool, api_call: sys::SteamAPICall)
+    unsafe extern "C" fn run_extra<C, F>(cb: *mut c_void, userdata: *mut c_void, param: *mut c_void, io_error: bool, api_call: sys::SteamAPICall)
         where F: for<'a> FnMut(&'a C, bool) + Send + Sync + 'static
     {
-        let data: &mut CallData<F, Manager> = &mut *(userdata as *mut CallData<F, Manager>);
+        let data: &mut CallData<F> = &mut *(userdata as *mut CallData<F>);
 
         if api_call == data.api_call {
             (data.func)(&*(param as *const _), io_error);
@@ -88,15 +88,15 @@ pub(crate) unsafe fn register_call_result<C, F, Manager>(inner: &Arc<Inner<Manag
         }
     }
 
-    unsafe extern "C" fn dealloc<C, F, Manager>(cb: *mut c_void, userdata: *mut c_void)
+    unsafe extern "C" fn dealloc<C, F>(cb: *mut c_void, userdata: *mut c_void)
         where F: for <'a> FnMut(&'a C, bool) + Send + Sync + 'static
     {
-        let data: Box<CallData<F, Manager>> = Box::from_raw(userdata as _);
+        let data: Box<CallData<F>> = Box::from_raw(userdata as _);
 
-        if let Some(inner) = data.inner.upgrade() {
+        if let Some(state) = data.state.upgrade() {
             sys::SteamAPI_UnregisterCallResult(cb, data.api_call);
 
-            let mut cbs = inner.callbacks.lock().unwrap();
+            let mut cbs = state.callbacks.lock().unwrap();
             cbs.call_results.remove(&data.api_call);
         }
 
@@ -106,21 +106,21 @@ pub(crate) unsafe fn register_call_result<C, F, Manager>(inner: &Arc<Inner<Manag
     let userdata = CallData {
         func: f,
         api_call: api_call,
-        inner: Arc::downgrade(&inner),
+        state: Arc::downgrade(&state),
     };
 
     let data = sys::CallbackData {
         param_size: mem::size_of::<C> as _,
         userdata: Box::into_raw(Box::new(userdata)) as _,
-        run: run::<C, F, Manager>,
-        run_extra: run_extra::<C, F, Manager>,
-        dealloc: dealloc::<C, F, Manager>,
+        run: run::<C, F>,
+        run_extra: run_extra::<C, F>,
+        dealloc: dealloc::<C, F>,
     };
 
     let ptr = sys::create_rust_callback(0x00, callback_id, data);
 
     sys::SteamAPI_RegisterCallResult(ptr, api_call);
 
-    let mut cbs = inner.callbacks.lock().unwrap();
+    let mut cbs = state.callbacks.lock().unwrap();
     cbs.call_results.insert(api_call, ptr);
 }

@@ -1,5 +1,12 @@
+use std::ffi::{ CStr, CString };
+use std::sync::Arc;
+use std::fmt;
 
-use super::*;
+use libc;
+use sys;
+
+use ::{ State, SteamId };
+use callback::Callback;
 
 bitflags! {
     #[repr(C)]
@@ -43,32 +50,31 @@ bitflags! {
 }
 
 /// Access to the steam friends interface
-pub struct Friends<Manager> {
-    pub(crate) friends: *mut sys::ISteamFriends,
-    pub(crate) inner: Arc<Inner<Manager>>,
+pub struct Friends {
+    pub(crate) state: Arc<State>,
+    pub(crate) inner: *mut sys::ISteamFriends,
 }
 
-impl <Manager> Friends<Manager> {
-
+impl Friends {
     /// Returns the (display) name of the current user
     pub fn name(&self) -> String {
         unsafe {
-            let name = sys::SteamAPI_ISteamFriends_GetPersonaName(self.friends);
+            let name = sys::SteamAPI_ISteamFriends_GetPersonaName(self.inner);
             let name = CStr::from_ptr(name);
             name.to_string_lossy().into_owned()
         }
     }
 
-    pub fn get_friends(&self, flags: FriendFlags) -> Vec<Friend<Manager>> {
+    pub fn get_friends(&self, flags: FriendFlags) -> Vec<Friend> {
         unsafe {
-            let count = sys::SteamAPI_ISteamFriends_GetFriendCount(self.friends, flags.bits() as _);
+            let count = sys::SteamAPI_ISteamFriends_GetFriendCount(self.inner, flags.bits() as _);
             let mut friends = Vec::with_capacity(count as usize);
             for idx in 0 .. count {
-                let friend = SteamId(sys::SteamAPI_ISteamFriends_GetFriendByIndex(self.friends, idx, flags.bits() as _));
+                let friend = SteamId(sys::SteamAPI_ISteamFriends_GetFriendByIndex(self.inner, idx, flags.bits() as _));
                 friends.push(Friend {
                     id: friend,
-                    friends: self.friends,
-                    _inner: self.inner.clone(),
+                    _state: self.state.clone(),
+                    inner: self.inner,
                 });
             }
 
@@ -78,7 +84,7 @@ impl <Manager> Friends<Manager> {
 
     pub fn request_user_information(&self, user: SteamId, name_only: bool) {
         unsafe {
-            sys::SteamAPI_ISteamFriends_RequestUserInformation(self.friends, user.0, name_only as u8);
+            sys::SteamAPI_ISteamFriends_RequestUserInformation(self.inner, user.0, name_only as u8);
         }
     }
 
@@ -86,7 +92,7 @@ impl <Manager> Friends<Manager> {
     pub fn activate_game_overlay_to_web_page(&self, url: &str) {
         unsafe {
             let url = CString::new(url).unwrap();
-            sys::SteamAPI_ISteamFriends_ActivateGameOverlayToWebPage(self.friends, url.as_ptr() as *const _);
+            sys::SteamAPI_ISteamFriends_ActivateGameOverlayToWebPage(self.inner, url.as_ptr() as *const _);
         }
     }
 }
@@ -110,26 +116,26 @@ unsafe impl Callback for PersonaStateChange {
     }
 }
 
-pub struct Friend<Manager> {
+pub struct Friend {
     id: SteamId,
-    friends: *mut sys::ISteamFriends,
-    _inner: Arc<Inner<Manager>>,
+    _state: Arc<State>,
+    inner: *mut sys::ISteamFriends,
 }
 
-impl <Manager> Debug for Friend<Manager> {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+impl fmt::Debug for Friend {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Friend({:?})", self.id)
     }
 }
 
-impl <Manager> Friend<Manager> {
+impl Friend {
     pub fn id(&self) -> SteamId {
         self.id
     }
 
     pub fn name(&self) -> String {
         unsafe {
-            let name = sys::SteamAPI_ISteamFriends_GetFriendPersonaName(self.friends, self.id.0);
+            let name = sys::SteamAPI_ISteamFriends_GetFriendPersonaName(self.inner, self.id.0);
             let name = CStr::from_ptr(name);
             name.to_string_lossy().into_owned()
         }
@@ -137,7 +143,7 @@ impl <Manager> Friend<Manager> {
 
     pub fn state(&self) -> FriendState {
         unsafe {
-            let state = sys::SteamAPI_ISteamFriends_GetFriendPersonaState(self.friends, self.id.0);
+            let state = sys::SteamAPI_ISteamFriends_GetFriendPersonaState(self.inner, self.id.0);
             match state {
                 sys::PersonaState::Offline => FriendState::Offline,
                 sys::PersonaState::Online => FriendState::Online,

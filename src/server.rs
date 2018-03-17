@@ -1,19 +1,12 @@
-use super::*;
-
+use std::ffi::CString;
+use std::sync::Arc;
 use std::net::Ipv4Addr;
 
-/// The main entry point into the steam client for servers.
-///
-/// This provides access to all of the steamworks api that
-/// servers can use.
-#[derive(Clone)]
-pub struct Server {
-    inner: Arc<Inner<ServerManager>>,
-    server: *mut sys::ISteamGameServer,
-}
+use sys;
 
-unsafe impl Send for Server {}
-unsafe impl Sync for Server {}
+use ::{ State, SteamId, SteamError };
+use callback::{ self, Callback };
+use user::{ AuthTicket, AuthSessionError };
 
 /// Used to set the mode that a gameserver will run in
 pub enum ServerMode {
@@ -32,6 +25,19 @@ pub enum ServerMode {
     /// VAC will be run on clients.
     AuthenticationAndSecure,
 }
+
+/// The main entry point into the steam client for servers.
+///
+/// This provides access to all of the steamworks api that
+/// servers can use.
+#[derive(Clone)]
+pub struct Server {
+    state: Arc<State>,
+    inner: *mut sys::ISteamGameServer,
+}
+
+unsafe impl Send for Server {}
+unsafe impl Sync for Server {}
 
 impl Server {
     /// Attempts to initialize the steamworks api and returns
@@ -57,7 +63,7 @@ impl Server {
         ip: Ipv4Addr, steam_port: u16,
         game_port: u16, query_port: u16,
         server_mode: ServerMode, version: &str,
-    ) -> SResult<Server> {
+    ) -> Result<Self, SteamError> {
         unsafe {
             let version = CString::new(version).unwrap();
             let raw_ip: u32 = ip.into();
@@ -66,6 +72,7 @@ impl Server {
                 ServerMode::Authentication => sys::ServerMode::Authentication,
                 ServerMode::AuthenticationAndSecure => sys::ServerMode::AuthenticationAndSecure,
             };
+
             if sys::steam_rust_game_server_init(
                 raw_ip, steam_port,
                 game_port, query_port,
@@ -74,17 +81,21 @@ impl Server {
             ) == 0 {
                 return Err(SteamError::InitFailed);
             }
+
+            fn shutdown() {
+                unsafe {
+                    sys::SteamGameServer_Shutdown();
+                }
+            }
+
             let server_raw = sys::steam_rust_get_server();
-            let server = Arc::new(Inner {
-                _manager: ServerManager { _priv: () },
-                callbacks: Mutex::new(Callbacks {
-                    callbacks: Vec::new(),
-                    call_results: HashMap::new(),
-                }),
-            });
+
             Ok(Server {
-                inner: server,
-                server: server_raw,
+                state: Arc::new(State {
+                    shutdown: shutdown,
+                    callbacks: Default::default(),
+                }),
+                inner: server_raw,
             })
         }
     }
@@ -108,17 +119,17 @@ impl Server {
     /// is called when the event arrives.
     pub fn register_callback<C, F>(&self, f: F)
         where C: Callback,
-              F: FnMut(C) + 'static + Send + Sync
+              F: FnMut(C) + Send + Sync + 'static
     {
         unsafe {
-            register_callback(&self.inner, f, true);
+            callback::register_callback(&self.state, f, true);
         }
     }
 
     /// Returns the steam id of the current server
     pub fn steam_id(&self) -> SteamId {
         unsafe {
-            SteamId(sys::SteamAPI_ISteamGameServer_GetSteamID(self.server))
+            SteamId(sys::SteamAPI_ISteamGameServer_GetSteamID(self.inner))
         }
     }
 
@@ -137,7 +148,7 @@ impl Server {
         unsafe {
             let mut ticket = vec![0; 1024];
             let mut ticket_len = 0;
-            let auth_ticket = sys::SteamAPI_ISteamGameServer_GetAuthSessionTicket(self.server, ticket.as_mut_ptr() as *mut _, 1024, &mut ticket_len);
+            let auth_ticket = sys::SteamAPI_ISteamGameServer_GetAuthSessionTicket(self.inner, ticket.as_mut_ptr() as *mut _, 1024, &mut ticket_len);
             ticket.truncate(ticket_len as usize);
             (AuthTicket(auth_ticket), ticket)
         }
@@ -150,7 +161,7 @@ impl Server {
     /// the specified entity.
     pub fn cancel_authentication_ticket(&self, ticket: AuthTicket) {
         unsafe {
-            sys::SteamAPI_ISteamGameServer_CancelAuthTicket(self.server, ticket.0);
+            sys::SteamAPI_ISteamGameServer_CancelAuthTicket(self.inner, ticket.0);
         }
     }
 
@@ -165,7 +176,7 @@ impl Server {
     pub fn begin_authentication_session(&self, user: SteamId, ticket: &[u8]) -> Result<(), AuthSessionError> {
         unsafe {
             let res = sys::SteamAPI_ISteamGameServer_BeginAuthSession(
-                self.server,
+                self.inner,
                 ticket.as_ptr() as *const _, ticket.len() as _,
                 user.0
             );
@@ -187,7 +198,7 @@ impl Server {
     /// the specified entity.
     pub fn end_authentication_session(&self, user: SteamId) {
         unsafe {
-            sys::SteamAPI_ISteamGameServer_EndAuthSession(self.server, user.0);
+            sys::SteamAPI_ISteamGameServer_EndAuthSession(self.inner, user.0);
         }
     }
 
@@ -198,7 +209,7 @@ impl Server {
     pub fn set_product(&self, product: &str) {
         unsafe {
             let product = CString::new(product).unwrap();
-            sys::SteamAPI_ISteamGameServer_SetProduct(self.server, product.as_ptr() as *const _);
+            sys::SteamAPI_ISteamGameServer_SetProduct(self.inner, product.as_ptr() as *const _);
         }
     }
 
@@ -209,21 +220,21 @@ impl Server {
     pub fn set_game_description(&self, desc: &str) {
         unsafe {
             let desc = CString::new(desc).unwrap();
-            sys::SteamAPI_ISteamGameServer_SetGameDescription(self.server, desc.as_ptr() as *const _);
+            sys::SteamAPI_ISteamGameServer_SetGameDescription(self.inner, desc.as_ptr() as *const _);
         }
     }
 
     /// Sets whether this server is dedicated or a listen server.
     pub fn set_dedicated_server(&self, dedicated: bool) {
         unsafe {
-            sys::SteamAPI_ISteamGameServer_SetDedicatedServer(self.server, dedicated as u8);
+            sys::SteamAPI_ISteamGameServer_SetDedicatedServer(self.inner, dedicated as u8);
         }
     }
 
     /// Login to a generic anonymous account
     pub fn log_on_anonymous(&self) {
         unsafe {
-            sys::SteamAPI_ISteamGameServer_LogOnAnonymous(self.server);
+            sys::SteamAPI_ISteamGameServer_LogOnAnonymous(self.inner);
         }
     }
 
@@ -242,58 +253,50 @@ impl Server {
     */
 }
 
-#[test]
-fn test() {
-    let server = Server::init(
-        [127, 0, 0, 1].into(),
-        23333, 23334, 23335,
-        ServerMode::Authentication, "0.0.1"
-    ).unwrap();
+#[cfg(test)]
+mod tests {
+    use super::{ Server, ServerMode } ;
+    use user::{ AuthSessionTicketResponse, ValidateAuthTicketResponse };
 
-    println!("{:?}", server.steam_id());
+    #[test]
+    fn server_test() {
+        let server = Server::init(
+            [127, 0, 0, 1].into(),
+            23333, 23334, 23335,
+            ServerMode::Authentication, "0.0.1"
+        ).unwrap();
 
-    server.set_product("steamworks-rs test");
-    server.set_game_description("basic server test");
-    server.set_dedicated_server(true);
-    server.log_on_anonymous();
+        println!("{:?}", server.steam_id());
 
-    println!("{:?}", server.steam_id());
+        server.set_product("steamworks-rs test");
+        server.set_game_description("basic server test");
+        server.set_dedicated_server(true);
+        server.log_on_anonymous();
 
-    server.register_callback(|v: AuthSessionTicketResponse| println!("{:?}", v));
-    server.register_callback(|v: ValidateAuthTicketResponse| println!("{:?}", v));
+        println!("{:?}", server.steam_id());
 
-    let id = server.steam_id();
-    let (auth, ticket) = server.authentication_session_ticket();
+        server.register_callback(|v: AuthSessionTicketResponse| println!("{:?}", v));
+        server.register_callback(|v: ValidateAuthTicketResponse| println!("{:?}", v));
 
-    println!("{:?}", server.begin_authentication_session(id, &ticket));
+        let id = server.steam_id();
+        let (auth, ticket) = server.authentication_session_ticket();
 
-    for _ in 0 .. 20 {
-        server.run_callbacks();
-        ::std::thread::sleep(::std::time::Duration::from_millis(50));
-    }
+        println!("{:?}", server.begin_authentication_session(id, &ticket));
 
-    println!("END");
-
-    server.cancel_authentication_ticket(auth);
-
-    for _ in 0 .. 20 {
-        server.run_callbacks();
-        ::std::thread::sleep(::std::time::Duration::from_millis(50));
-    }
-
-    server.end_authentication_session(id);
-}
-
-
-/// Manages keeping the steam api active for servers
-pub struct ServerManager {
-    _priv: (),
-}
-
-impl Drop for ServerManager {
-    fn drop(&mut self) {
-        unsafe {
-            sys::SteamGameServer_Shutdown();
+        for _ in 0 .. 20 {
+            server.run_callbacks();
+            ::std::thread::sleep(::std::time::Duration::from_millis(50));
         }
+
+        println!("END");
+
+        server.cancel_authentication_ticket(auth);
+
+        for _ in 0 .. 20 {
+            server.run_callbacks();
+            ::std::thread::sleep(::std::time::Duration::from_millis(50));
+        }
+
+        server.end_authentication_session(id);
     }
 }

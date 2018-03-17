@@ -1,11 +1,9 @@
+use std::sync::Arc;
 
-use super::*;
+use sys;
 
-/// Access to the steam matchmaking interface
-pub struct Matchmaking<Manager> {
-    pub(crate) mm: *mut sys::ISteamMatchmaking,
-    pub(crate) inner: Arc<Inner<Manager>>,
-}
+use ::{ State, SteamError };
+use callback;
 
 const CALLBACK_BASE_ID: i32 = 500;
 
@@ -19,15 +17,20 @@ pub enum LobbyType {
 #[derive(Debug)]
 pub struct LobbyId(u64);
 
-impl <Manager> Matchmaking<Manager> {
+/// Access to the steam matchmaking interface
+pub struct Matchmaking {
+    pub(crate) state: Arc<State>,
+    pub(crate) inner: *mut sys::ISteamMatchmaking,
+}
 
+impl Matchmaking {
     pub fn request_lobby_list<F>(&self, mut cb: F)
-        where F: FnMut(Result<Vec<LobbyId>, SteamError>) + 'static + Send + Sync
+        where F: FnMut(Result<Vec<LobbyId>, SteamError>) + Send + Sync + 'static
     {
         unsafe {
-            let api_call = sys::SteamAPI_ISteamMatchmaking_RequestLobbyList(self.mm);
-            register_call_result::<sys::LobbyMatchList, _, _>(
-                &self.inner, api_call, CALLBACK_BASE_ID + 10,
+            let api_call = sys::SteamAPI_ISteamMatchmaking_RequestLobbyList(self.inner);
+            callback::register_call_result::<sys::LobbyMatchList, _>(
+                &self.state, api_call, CALLBACK_BASE_ID + 10,
                 move |v, io_error| {
                    cb(if io_error {
                       Err(SteamError::IOFailure)
@@ -43,7 +46,7 @@ impl <Manager> Matchmaking<Manager> {
     }
 
     pub fn create_lobby<F>(&self, ty: LobbyType, max_members: u32, mut cb: F)
-        where F: FnMut(Result<LobbyId, SteamError>) + 'static + Send + Sync
+        where F: FnMut(Result<LobbyId, SteamError>) + Send + Sync + 'static 
     {
         unsafe {
             let ty = match ty {
@@ -52,9 +55,9 @@ impl <Manager> Matchmaking<Manager> {
                 LobbyType::Public => sys::LobbyType::Public,
                 LobbyType::Invisible => sys::LobbyType::Invisible,
             };
-            let api_call = sys::SteamAPI_ISteamMatchmaking_CreateLobby(self.mm, ty, max_members as _);
-            register_call_result::<sys::LobbyCreated, _, _>(
-                &self.inner, api_call, CALLBACK_BASE_ID + 13,
+            let api_call = sys::SteamAPI_ISteamMatchmaking_CreateLobby(self.inner, ty, max_members as _);
+            callback::register_call_result::<sys::LobbyCreated, _>(
+                &self.state, api_call, CALLBACK_BASE_ID + 13,
                 move |v, io_error| {
                     cb(if io_error {
                         Err(SteamError::IOFailure)
@@ -68,20 +71,27 @@ impl <Manager> Matchmaking<Manager> {
     }
 }
 
-#[test]
-fn test_lobby() {
-    let client = Client::init().unwrap();
-    let mm = client.matchmaking();
+#[cfg(test)]
+mod tests {
+    use ::SteamApi;
+    use super::LobbyType;
 
-    mm.request_lobby_list(|v| {
-        println!("List: {:?}", v);
-    });
-    mm.create_lobby(LobbyType::Private, 4, |v| {
-        println!("Create: {:?}", v);
-    });
+    #[test]
+    fn test_lobby() {
+        let api = SteamApi::init().unwrap();
+        let mm = api.matchmaking();
 
-    for _ in 0 .. 100 {
-        client.run_callbacks();
-        ::std::thread::sleep(::std::time::Duration::from_millis(100));
+        mm.request_lobby_list(|v| {
+            println!("List: {:?}", v);
+        });
+        
+        mm.create_lobby(LobbyType::Private, 4, |v| {
+            println!("Create: {:?}", v);
+        });
+
+        for _ in 0 .. 100 {
+            api.run_callbacks();
+            ::std::thread::sleep(::std::time::Duration::from_millis(100));
+        }
     }
 }

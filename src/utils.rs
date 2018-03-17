@@ -1,11 +1,10 @@
+use std::ffi::CStr;
+use std::sync::Arc;
 
-use super::*;
+use sys;
 
-/// Access to the steam utils interface
-pub struct Utils<Manager> {
-    pub(crate) utils: *mut sys::ISteamUtils,
-    pub(crate) _inner: Arc<Inner<Manager>>,
-}
+use ::State;
+use apps::AppId;
 
 pub enum NotificationPosition {
     TopLeft,
@@ -14,11 +13,20 @@ pub enum NotificationPosition {
     BottomRight,
 }
 
-impl <Manager> Utils<Manager> {
-    /// Returns the app ID of the current process
+/// Access to the steam utils interface
+pub struct Utils {
+    pub(crate) _state: Arc<State>,
+    pub(crate) inner: *mut sys::ISteamUtils,
+}
+
+impl Utils {
+    /// Returns whether the user currently has the app with the given
+    /// ID currently installed.
+    ///
+    /// This does not mean the user owns the game.
     pub fn app_id(&self) -> AppId {
         unsafe {
-            AppId(sys::SteamAPI_ISteamUtils_GetAppID(self.utils))
+            AppId(sys::SteamAPI_ISteamUtils_GetAppID(self.inner))
         }
     }
 
@@ -28,7 +36,7 @@ impl <Manager> Utils<Manager> {
     /// Generally you want `Apps::current_game_language` instead of this
     pub fn ui_language(&self) -> String {
         unsafe {
-            let lang = sys::SteamAPI_ISteamUtils_GetSteamUILanguage(self.utils);
+            let lang = sys::SteamAPI_ISteamUtils_GetSteamUILanguage(self.inner);
             let lang = CStr::from_ptr(lang);
             lang.to_string_lossy().into_owned()
         }
@@ -44,7 +52,7 @@ impl <Manager> Utils<Manager> {
                 NotificationPosition::BottomLeft => sys::NotificationPosition::BottomLeft,
                 NotificationPosition::BottomRight => sys::NotificationPosition::BottomRight,
             };
-            sys::SteamAPI_ISteamUtils_SetOverlayNotificationPosition(self.utils, position);
+            sys::SteamAPI_ISteamUtils_SetOverlayNotificationPosition(self.inner, position);
         }
     }
 }

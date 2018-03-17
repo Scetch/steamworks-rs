@@ -1,17 +1,22 @@
+use std::sync::Arc;
 
-use super::*;
+use libc;
+use sys;
+
+use ::{ State, SteamId, SteamError };
+use callback::Callback;
 
 /// Access to the steam user interface
-pub struct User<Manager> {
-    pub(crate) user: *mut sys::ISteamUser,
-    pub(crate) _inner: Arc<Inner<Manager>>,
+pub struct User {
+    pub(crate) _state: Arc<State>,
+    pub(crate) inner: *mut sys::ISteamUser,
 }
 
-impl <Manager> User<Manager> {
+impl User {
     /// Returns the steam id of the current user
     pub fn steam_id(&self) -> SteamId {
         unsafe {
-            SteamId(sys::SteamAPI_ISteamUser_GetSteamID(self.user))
+            SteamId(sys::SteamAPI_ISteamUser_GetSteamID(self.inner))
         }
     }
 
@@ -30,7 +35,7 @@ impl <Manager> User<Manager> {
         unsafe {
             let mut ticket = vec![0; 1024];
             let mut ticket_len = 0;
-            let auth_ticket = sys::SteamAPI_ISteamUser_GetAuthSessionTicket(self.user, ticket.as_mut_ptr() as *mut _, 1024, &mut ticket_len);
+            let auth_ticket = sys::SteamAPI_ISteamUser_GetAuthSessionTicket(self.inner, ticket.as_mut_ptr() as *mut _, 1024, &mut ticket_len);
             ticket.truncate(ticket_len as usize);
             (AuthTicket(auth_ticket), ticket)
         }
@@ -43,7 +48,7 @@ impl <Manager> User<Manager> {
     /// the specified entity.
     pub fn cancel_authentication_ticket(&self, ticket: AuthTicket) {
         unsafe {
-            sys::SteamAPI_ISteamUser_CancelAuthTicket(self.user, ticket.0);
+            sys::SteamAPI_ISteamUser_CancelAuthTicket(self.inner, ticket.0);
         }
     }
 
@@ -58,7 +63,7 @@ impl <Manager> User<Manager> {
     pub fn begin_authentication_session(&self, user: SteamId, ticket: &[u8]) -> Result<(), AuthSessionError> {
         unsafe {
             let res = sys::SteamAPI_ISteamUser_BeginAuthSession(
-                self.user,
+                self.inner,
                 ticket.as_ptr() as *const _, ticket.len() as _,
                 user.0
             );
@@ -80,7 +85,7 @@ impl <Manager> User<Manager> {
     /// the specified entity.
     pub fn end_authentication_session(&self, user: SteamId) {
         unsafe {
-            sys::SteamAPI_ISteamUser_EndAuthSession(self.user, user.0);
+            sys::SteamAPI_ISteamUser_EndAuthSession(self.inner, user.0);
         }
     }
 }
@@ -105,6 +110,7 @@ pub enum AuthSessionError {
     ExpiredTicket,
 }
 
+/*
 #[test]
 fn test() {
     let client = Client::init().unwrap();
@@ -134,6 +140,7 @@ fn test() {
 
     user.end_authentication_session(id);
 }
+*/
 
 /// A handle for an authentication ticket that can be used to cancel
 /// it.
@@ -148,7 +155,7 @@ pub struct AuthSessionTicketResponse {
     /// The ticket in question
     pub ticket: AuthTicket,
     /// The result of generating the ticket
-    pub result: SResult<()>,
+    pub result: Result<(), SteamError>,
 }
 
 unsafe impl Callback for AuthSessionTicketResponse {
@@ -180,7 +187,6 @@ pub struct ValidateAuthTicketResponse {
     /// `steam_id` if the game is borrowed.
     pub owner_steam_id: SteamId,
 }
-
 
 unsafe impl Callback for ValidateAuthTicketResponse {
     const ID: i32 = 143;
